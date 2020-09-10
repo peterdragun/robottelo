@@ -36,7 +36,7 @@ from robottelo.test import CLITestCase
 
 
 @run_in_one_thread
-class DiscoveredTestCase(CLITestCase):
+class TestDiscoveredHost:
     """Implements Foreman discovery CLI tests."""
 
     def _assertdiscoveredhost(self, hostname):
@@ -54,9 +54,9 @@ class DiscoveredTestCase(CLITestCase):
                 continue
             return discovered_host
 
-    @classmethod
     @skip_if_not_set('vlan_networking')
-    def setUpClass(cls):
+    @pytest.fixture(scope="class")
+    def foreman_discovery(self):
         """Steps to Configure foreman discovery
 
         1. Build PXE default template
@@ -66,8 +66,6 @@ class DiscoveredTestCase(CLITestCase):
         4. Enable auto_provision flag to perform discovery via discovery
            rules.
         """
-        super(DiscoveredTestCase, cls).setUpClass()
-
         # Build PXE default template to get default PXE file
         Template.build_pxe_default()
         # let's just modify the timeouts to speed things up
@@ -81,36 +79,38 @@ class DiscoveredTestCase(CLITestCase):
         )
 
         # Create Org and location
-        cls.org = make_org()
-        cls.loc = make_location()
+        org = make_org()
+        loc = make_location()
 
         # Get default settings values
-        cls.default_discovery_loc = Settings.list({'search': 'name=%s' % 'discovery_location'})[0]
-        cls.default_discovery_org = Settings.list(
+        default_discovery_loc = Settings.list({'search': 'name=%s' % 'discovery_location'})[0]
+        default_discovery_org = Settings.list(
             {'search': 'name=%s' % 'discovery_organization'}
         )[0]
-        cls.default_discovery_auto = Settings.list({'search': 'name=%s' % 'discovery_auto'})[0]
+        default_discovery_auto = Settings.list({'search': 'name=%s' % 'discovery_auto'})[0]
 
         # Update default org and location params to place discovered host
-        Settings.set({'name': 'discovery_location', 'value': cls.loc['name']})
-        Settings.set({'name': 'discovery_organization', 'value': cls.org['name']})
+        Settings.set({'name': 'discovery_location', 'value': loc['name']})
+        Settings.set({'name': 'discovery_organization', 'value': org['name']})
 
         # Enable flag to auto provision discovered hosts via discovery rules
         Settings.set({'name': 'discovery_auto', 'value': 'true'})
 
         # Flag which shows whether environment is fully configured for
         # discovered host provisioning.
-        cls.configured_env = False
-
-    @classmethod
-    def tearDownClass(cls):
-        """Restore default global setting's values"""
-        Settings.set({'name': 'discovery_location', 'value': cls.default_discovery_loc['value']})
+        configured_env = configure_env_for_provision(org=org, loc=loc)
+        yield {
+            'default_discovery_auto': default_discovery_auto,
+            'default_discovery_loc': default_discovery_loc,
+            'default_discovery_org': default_discovery_org,
+            'configured_env': configured_env,
+        }
+        # Restore default global setting's values
+        Settings.set({'name': 'discovery_location', 'value': default_discovery_loc['value']})
         Settings.set(
-            {'name': 'discovery_organization', 'value': cls.default_discovery_org['value']}
+            {'name': 'discovery_organization', 'value': default_discovery_org['value']}
         )
-        Settings.set({'name': 'discovery_auto', 'value': cls.default_discovery_auto['value']})
-        super(DiscoveredTestCase, cls).tearDownClass()
+        Settings.set({'name': 'discovery_auto', 'value': default_discovery_auto['value']})
 
     @tier3
     def test_positive_pxe_based_discovery(self):
@@ -132,7 +132,7 @@ class DiscoveredTestCase(CLITestCase):
         with LibvirtGuest() as pxe_host:
             hostname = pxe_host.guest_name
             host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(host)
+            assert host is not None
 
     @tier3
     def test_positive_pxe_less_with_dhcp_unattended(self):
@@ -152,7 +152,7 @@ class DiscoveredTestCase(CLITestCase):
         with LibvirtGuest(boot_iso=True) as pxe_less_host:
             hostname = pxe_less_host.guest_name
             host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(host)
+            assert host is not None
 
     @pytest.mark.stubbed
     @tier3
@@ -202,7 +202,7 @@ class DiscoveredTestCase(CLITestCase):
 
     @tier3
     @upgrade
-    def test_positive_provision_pxeless_bios_syslinux(self):
+    def test_positive_provision_pxeless_bios_syslinux(self, foreman_discovery):
         """Provision and discover the pxe-less BIOS host from cli using SYSLINUX
         loader
 
@@ -236,18 +236,16 @@ class DiscoveredTestCase(CLITestCase):
 
         :BZ: 1731112
         """
-        if not self.configured_env:
-            self.__class__.configured_env = configure_env_for_provision(org=self.org, loc=self.loc)
         with LibvirtGuest(boot_iso=True) as pxe_host:
             hostname = pxe_host.guest_name
             # fixme: assertion #1
             discovered_host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(discovered_host)
+            assert discovered_host is not None
             # Provision just discovered host
             DiscoveredHost.provision(
                 {
                     'name': discovered_host['name'],
-                    'hostgroup': self.configured_env['hostgroup']['name'],
+                    'hostgroup': foreman_discovery['configured_env']['hostgroup']['name'],
                     'root-password': gen_string('alphanumeric'),
                 }
             )
@@ -255,24 +253,18 @@ class DiscoveredTestCase(CLITestCase):
             provisioned_host = Host.info(
                 {
                     'name': '{0}.{1}'.format(
-                        discovered_host['name'], self.configured_env['domain']['name']
+                        discovered_host['name'], foreman_discovery['configured_env']['domain']['name']
                     )
                 }
             )
-            self.assertEqual(
-                provisioned_host['network']['subnet-ipv4'], self.configured_env['subnet']['name']
-            )
-            self.assertEqual(
-                provisioned_host['operating-system']['partition-table'],
-                self.configured_env['ptable']['name'],
-            )
-            self.assertEqual(
-                provisioned_host['operating-system']['operating-system'],
-                self.configured_env['os']['title'],
-            )
+            assert provisioned_host['network']['subnet-ipv4'] == foreman_discovery['configured_env']['subnet']['name']
+            assert provisioned_host['operating-system']['partition-table'] == \
+                foreman_discovery['configured_env']['ptable']['name']
+            assert provisioned_host['operating-system']['operating-system'] == \
+                foreman_discovery['configured_env']['os']['title']
             # Check that provisioned host is not in the list of discovered
             # hosts anymore
-            with self.assertRaises(CLIReturnCodeError):
+            with pytest.raises(CLIReturnCodeError):
                 DiscoveredHost.info({'id': discovered_host['id']})
 
     @pytest.mark.stubbed
@@ -391,7 +383,7 @@ class DiscoveredTestCase(CLITestCase):
 
     @tier3
     @upgrade
-    def test_positive_provision_pxe_host_with_bios_syslinux(self):
+    def test_positive_provision_pxe_host_with_bios_syslinux(self, foreman_discovery):
         """Provision the pxe-based BIOS discovered host from cli using SYSLINUX
         loader
 
@@ -439,19 +431,17 @@ class DiscoveredTestCase(CLITestCase):
         :BZ: 1731112
         """
         # fixme: assertion #1
-        if not self.configured_env:
-            self.__class__.configured_env = configure_env_for_provision(org=self.org, loc=self.loc)
         with LibvirtGuest() as pxe_host:
             hostname = pxe_host.guest_name
             # fixme: assertion #2-3
             # assertion #4
             discovered_host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(discovered_host)
+            assert discovered_host is not None
             # Provision just discovered host
             DiscoveredHost.provision(
                 {
                     'name': discovered_host['name'],
-                    'hostgroup': self.configured_env['hostgroup']['name'],
+                    'hostgroup': foreman_discovery['configured_env']['hostgroup']['name'],
                     'root-password': gen_string('alphanumeric'),
                 }
             )
@@ -459,24 +449,18 @@ class DiscoveredTestCase(CLITestCase):
             provisioned_host = Host.info(
                 {
                     'name': '{0}.{1}'.format(
-                        discovered_host['name'], self.configured_env['domain']['name']
+                        discovered_host['name'], foreman_discovery['configured_env']['domain']['name']
                     )
                 }
             )
             # assertion #8
-            self.assertEqual(
-                provisioned_host['network']['subnet-ipv4'], self.configured_env['subnet']['name']
-            )
-            self.assertEqual(
-                provisioned_host['operating-system']['partition-table'],
-                self.configured_env['ptable']['name'],
-            )
-            self.assertEqual(
-                provisioned_host['operating-system']['operating-system'],
-                self.configured_env['os']['title'],
-            )
+            assert provisioned_host['network']['subnet-ipv4'] == foreman_discovery['configured_env']['subnet']['name']
+            assert provisioned_host['operating-system']['partition-table'] == \
+                foreman_discovery['configured_env']['ptable']['name']
+            assert provisioned_host['operating-system']['operating-system'] == \
+                foreman_discovery['configured_env']['os']['title']
             # assertion #9
-            with self.assertRaises(CLIReturnCodeError):
+            with pytest.raises(CLIReturnCodeError):
                 DiscoveredHost.info({'id': discovered_host['id']})
 
     @pytest.mark.stubbed
@@ -643,9 +627,9 @@ class DiscoveredTestCase(CLITestCase):
         with LibvirtGuest(boot_iso=True) as pxe_less_host:
             hostname = pxe_less_host.guest_name
             host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(host)
+            assert host is not None
         DiscoveredHost.delete({'id': host['id']})
-        with self.assertRaises(CLIReturnCodeError):
+        with pytest.raises(CLIReturnCodeError):
             DiscoveredHost.info({'id': host['id']})
 
     @tier3
@@ -663,9 +647,9 @@ class DiscoveredTestCase(CLITestCase):
         with LibvirtGuest() as pxe_host:
             hostname = pxe_host.guest_name
             host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(host)
+            assert host is not None
         DiscoveredHost.delete({'id': host['id']})
-        with self.assertRaises(CLIReturnCodeError):
+        with pytest.raises(CLIReturnCodeError):
             DiscoveredHost.info({'id': host['id']})
 
     @pytest.mark.stubbed
@@ -825,7 +809,7 @@ class DiscoveredTestCase(CLITestCase):
 
     @tier3
     @upgrade
-    def test_positive_provision_pxe_host_with_parameters(self):
+    def test_positive_provision_pxe_host_with_parameters(self, foreman_discovery):
         """Provision the pxe-based BIOS discovered host with host parameters from cli using
         SYSLINUX loader
 
@@ -855,16 +839,14 @@ class DiscoveredTestCase(CLITestCase):
         param1_key, param1_value = gen_string('alpha'), gen_string('alphanumeric')
         param2_key, param2_value = gen_string('alpha'), gen_string('alphanumeric')
         host_params = ['{}={}, {}={}'.format(param1_key, param1_value, param2_key, param2_value)]
-        if not self.configured_env:
-            self.__class__.configured_env = configure_env_for_provision(org=self.org, loc=self.loc)
         with LibvirtGuest() as pxe_host:
             hostname = pxe_host.guest_name
             discovered_host = self._assertdiscoveredhost(hostname)
-            self.assertIsNotNone(discovered_host)
+            assert discovered_host is not None
             DiscoveredHost.provision(
                 {
                     'name': discovered_host['name'],
-                    'hostgroup': self.configured_env['hostgroup']['name'],
+                    'hostgroup': foreman_discovery['configured_env']['hostgroup']['name'],
                     'root-password': gen_string('alphanumeric'),
                     'parameters': host_params,
                 }
@@ -872,11 +854,11 @@ class DiscoveredTestCase(CLITestCase):
             provisioned_host = Host.info(
                 {
                     'name': '{}.{}'.format(
-                        discovered_host['name'], self.configured_env['domain']['name']
+                        discovered_host['name'], foreman_discovery['configured_env']['domain']['name']
                     )
                 }
             )
-            self.assertEqual(provisioned_host['parameters'][str(param1_key).lower()], param1_value)
-            self.assertEqual(provisioned_host['parameters'][str(param2_key).lower()], param2_value)
-            with self.assertRaises(CLIReturnCodeError):
+            assert provisioned_host['parameters'][str(param1_key).lower()] == param1_value
+            assert provisioned_host['parameters'][str(param2_key).lower()] == param2_value
+            with pytest.raises(CLIReturnCodeError):
                 DiscoveredHost.info({'id': discovered_host['id']})
